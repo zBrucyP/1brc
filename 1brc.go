@@ -6,24 +6,27 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"time"
 )
 
 type StationMeasure struct {
 	StationName string
-	MinTemp float64
-	AvgTemp float64
-	MaxTemp float64
-	count int
+	MinTemp     float64
+	AvgTemp     float64
+	MaxTemp     float64
+	count       int
 }
 
 const MB = 1024 * 1024
 
 func main() {
+	start := time.Now()
 	fmt.Println("Starting 1brc")
 
 	// get file name
 	// fileName := "measurements100lines.txt" // basic testing
 	// fileName := "measurements2andhalfmb.txt" // testing for division of file into chunks
+	// fileName := "measurementslast500klines.txt" // testing for division of file into chunks
 	fileName := "measurements.txt" // real file
 
 	// process file, get results
@@ -35,10 +38,14 @@ func main() {
 	// print results
 	fmt.Print("{")
 	for station, results := range results {
-		fmt.Printf("%s=%.1f/%.1f/%.1f", station, results.MinTemp, results.AvgTemp, results.MaxTemp) // TODO: round to 1 decimal
+		fmt.Printf("%s=%.1f/%.1f/%.1f, ", station, results.MinTemp, results.AvgTemp, results.MaxTemp) // TODO: round to 1 decimal
 	}
 	// TODO: remove last ,
 	fmt.Print("}")
+
+	fmt.Println("")
+	elapsed := time.Since(start)
+	fmt.Println("1brc took ", elapsed.Seconds(), " seconds")
 }
 
 func processFileNaive(fileName string) (map[string]StationMeasure, error) {
@@ -56,7 +63,7 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 	}
 	fileSize := fileInfo.Size()
 	offsets := make([]int64, 0)
-	chunkSize := int64(16 * MB)
+	chunkSize := int64(64 * MB)
 	n := int64(0)
 	for n < fileSize {
 		offsets = append(offsets, int64(n))
@@ -82,8 +89,10 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 		for stationName, measure := range stationMeasure {
 			if existingMeasure, ok := result[stationName]; ok {
 				existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
-				existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count + measure.count)
+				existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
 				existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
+				existingMeasure.count += measure.count
+				result[stationName] = existingMeasure
 			} else {
 				result[stationName] = measure
 			}
@@ -102,11 +111,20 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (ma
 	}
 	fmt.Println("read n bytes in chunk:", n)
 
-	// handle if offset is not 0
-	// if offset != 0 {
-
 	stationMeasures := make(map[string]StationMeasure)
 	index := 0
+
+	// handle if offset is not 0
+	if offset != 0 {
+		// find first newline
+		for {
+			if buffer[index] == '\n' {
+				index++
+				break
+			}
+			index++
+		}
+	}
 
 	for {
 		// read line
@@ -115,23 +133,20 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (ma
 		var valueStart int
 		var valueEnd int
 		for {
-			// fmt.Println("index", index)
 			if buffer[index] == ';' {
 				nameEnd = index
 				valueStart = index + 1
 			}
 
 			if buffer[index] == '\n' {
-				valueEnd = index-1
+				valueEnd = index
 				index++
 				break
 			}
-			
+
 			index++
 		}
 
-		// fmt.Println("nameStart", nameStart)
-		// fmt.Println("nameEnd", nameEnd)
 		name := string(buffer[nameStart:nameEnd])
 		value, err := strconv.ParseFloat(string(buffer[valueStart:valueEnd]), 64)
 		if err != nil {
@@ -140,15 +155,12 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (ma
 			return nil, fmt.Errorf("error parsing value: %w", err)
 		}
 
-		// fmt.Println("name", name)
-		// fmt.Println("value", value)
-
 		stationMeasure := StationMeasure{
 			StationName: name,
-			MinTemp: value,
-			AvgTemp: value,
-			MaxTemp: value,
-			count: 1,
+			MinTemp:     value,
+			AvgTemp:     value,
+			MaxTemp:     value,
+			count:       1,
 		}
 		stationMeasures = merge(stationMeasures, stationMeasure)
 
@@ -164,8 +176,9 @@ func merge(existingMeasures map[string]StationMeasure, newMeasure StationMeasure
 	stationName := newMeasure.StationName
 	if existingMeasure, ok := existingMeasures[stationName]; ok {
 		existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, newMeasure.MinTemp)
-		existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, newMeasure.AvgTemp, existingMeasure.count + newMeasure.count)
+		existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, newMeasure.AvgTemp, existingMeasure.count+newMeasure.count)
 		existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, newMeasure.MaxTemp)
+		existingMeasure.count += newMeasure.count
 		existingMeasures[stationName] = existingMeasure
 	} else {
 		existingMeasures[stationName] = newMeasure
@@ -178,9 +191,9 @@ func getNewAverage(currentAverage, newValue float64, count int) float64 {
 }
 
 func getNewMin(currentMin, newValue float64) float64 {
-	return math.Min(currentMin, newValue)
+	return min(currentMin, newValue)
 }
 
 func getNewMax(currentMax, newValue float64) float64 {
-	return math.Max(currentMax, newValue)
+	return max(currentMax, newValue)
 }
