@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -26,8 +27,8 @@ func main() {
 	// get file name
 	// fileName := "measurements100lines.txt" // basic testing
 	// fileName := "measurements2andhalfmb.txt" // testing for division of file into chunks
-	// fileName := "measurementslast500klines.txt" // testing for division of file into chunks
-	fileName := "measurements.txt" // real file
+	fileName := "measurementslast500klines.txt" // testing for division of file into chunks
+	// fileName := "measurements.txt" // real file
 
 	// process file, get results
 	results, err := processFileNaive(fileName)
@@ -69,23 +70,41 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 		offsets = append(offsets, int64(n))
 		n += chunkSize
 	}
-	fmt.Println("offsets", offsets)
+	// fmt.Println("offsets", offsets)
+
+	measuresChannel := make(chan map[string]StationMeasure)
+	var wg sync.WaitGroup
 
 	// process segment of data
-	stationMeasures := make([]map[string]StationMeasure, len(offsets))
+	// stationMeasures := make([]map[string]StationMeasure, len(offsets))
 	for i, offset := range offsets {
 		fmt.Println("Processing chunk", i)
+		wg.Add(1)
+
 		buf := make([]byte, chunkSize+128)
-		stationMeasure, err := parseChunk(file, buf, offset, chunkSize)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing chunk: %w", err)
-		}
-		stationMeasures[i] = stationMeasure
+		go func() {
+			err := parseChunk(file, buf, offset, chunkSize, measuresChannel)
+			if err != nil {
+				fmt.Println("error parsing chunk: %w", err)
+			}
+
+			wg.Done()
+		}()
+
+		// stationMeasures[i] = stationMeasure
 	}
 
-	// merge data into results
+	go func() {
+		wg.Wait()
+		close(measuresChannel)
+	}()
+
+	fmt.Println("all chunks processed")
+
 	result := make(map[string]StationMeasure)
-	for _, stationMeasure := range stationMeasures {
+	for stationMeasure := range measuresChannel {
+		fmt.Println("received station measure")
+		// merge data into results
 		for stationName, measure := range stationMeasure {
 			if existingMeasure, ok := result[stationName]; ok {
 				existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
@@ -98,16 +117,17 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 			}
 		}
 	}
+	close(measuresChannel)
 
 	// return
 	return result, nil
 }
 
-func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (map[string]StationMeasure, error) {
+func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64, outputChannel chan map[string]StationMeasure) error {
 	// read chunk
 	n, err := file.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
-		return nil, fmt.Errorf("error reading chunk: %w", err)
+		return fmt.Errorf("error reading chunk: %w", err)
 	}
 	fmt.Println("read n bytes in chunk:", n)
 
@@ -152,7 +172,7 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (ma
 		if err != nil {
 			fmt.Println("error parsing value:", string(buffer[valueStart:valueEnd]), "namestart: ", nameStart, "nameend: ", nameEnd, "valuestart: ", valueStart, "valueend: ", valueEnd, "index: ", index)
 			fmt.Println("nearbuffer", string(buffer[int(math.Max(float64(index-10), float64(0))):index+10]))
-			return nil, fmt.Errorf("error parsing value: %w", err)
+			return fmt.Errorf("error parsing value: %w", err)
 		}
 
 		stationMeasure := StationMeasure{
@@ -169,7 +189,11 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (ma
 		}
 	}
 
-	return stationMeasures, nil
+	fmt.Println("put station measures in channel")
+
+	outputChannel <- stationMeasures
+
+	return nil
 }
 
 func merge(existingMeasures map[string]StationMeasure, newMeasure StationMeasure) map[string]StationMeasure {
