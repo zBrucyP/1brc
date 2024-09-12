@@ -63,7 +63,7 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 	}
 	fileSize := fileInfo.Size()
 	offsets := make([]int64, 0)
-	chunkSize := int64(64 * MB)
+	chunkSize := int64(128 * MB)
 	n := int64(0)
 	for n < fileSize {
 		offsets = append(offsets, int64(n))
@@ -74,7 +74,7 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 	// process segment of data
 	stationMeasures := make([]map[string]StationMeasure, len(offsets))
 	for i, offset := range offsets {
-		fmt.Println("Processing chunk", i)
+		// fmt.Println("Processing chunk", i)
 		buf := make([]byte, chunkSize+128)
 		stationMeasure, err := parseChunk(file, buf, offset, chunkSize)
 		if err != nil {
@@ -109,7 +109,7 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64) (ma
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("error reading chunk: %w", err)
 	}
-	fmt.Println("read n bytes in chunk:", n)
+	// fmt.Println("read n bytes in chunk:", n)
 
 	stationMeasures := make(map[string]StationMeasure)
 	index := 0
