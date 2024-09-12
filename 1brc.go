@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// TODO: try moving to SSD
+
 type StationMeasure struct {
 	StationName string
 	MinTemp     float64
@@ -27,8 +29,8 @@ func main() {
 	// get file name
 	// fileName := "measurements100lines.txt" // basic testing
 	// fileName := "measurements2andhalfmb.txt" // testing for division of file into chunks
-	fileName := "measurementslast500klines.txt" // testing for division of file into chunks
-	// fileName := "measurements.txt" // real file
+	// fileName := "measurementslast500klines.txt" // testing for division of file into chunks
+	fileName := "measurements.txt" // real file
 
 	// process file, get results
 	results, err := processFileNaive(fileName)
@@ -49,7 +51,7 @@ func main() {
 	fmt.Println("1brc took ", elapsed.Seconds(), " seconds")
 }
 
-func processFileNaive(fileName string) (map[string]StationMeasure, error) {
+func processFileNaive(fileName string) (map[string]*StationMeasure, error) {
 	// open file
 	file, err := os.Open(fileName)
 	if err != nil {
@@ -64,7 +66,7 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 	}
 	fileSize := fileInfo.Size()
 	offsets := make([]int64, 0)
-	chunkSize := int64(64 * MB)
+	chunkSize := int64(128 * MB)
 	n := int64(0)
 	for n < fileSize {
 		offsets = append(offsets, int64(n))
@@ -72,24 +74,24 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 	}
 	// fmt.Println("offsets", offsets)
 
-	measuresChannel := make(chan map[string]StationMeasure)
+	const numMergeWorkers = 15
+
+	measuresChannel := make(chan map[string]*StationMeasure, len(offsets))
 	var wg sync.WaitGroup
 
 	// process segment of data
 	// stationMeasures := make([]map[string]StationMeasure, len(offsets))
-	for i, offset := range offsets {
-		fmt.Println("Processing chunk", i)
+	for _, offset := range offsets {
+		// fmt.Println("Processing chunk", i)
 		wg.Add(1)
-
 		buf := make([]byte, chunkSize+128)
-		go func() {
+		go func(offset int64) {
+			defer wg.Done()
 			err := parseChunk(file, buf, offset, chunkSize, measuresChannel)
 			if err != nil {
 				fmt.Println("error parsing chunk: %w", err)
 			}
-
-			wg.Done()
-		}()
+		}(offset)
 
 		// stationMeasures[i] = stationMeasure
 	}
@@ -99,39 +101,81 @@ func processFileNaive(fileName string) (map[string]StationMeasure, error) {
 		close(measuresChannel)
 	}()
 
-	fmt.Println("all chunks processed")
+	var resultMutex sync.Mutex
+	result := make(map[string]*StationMeasure)
 
-	result := make(map[string]StationMeasure)
-	for stationMeasure := range measuresChannel {
-		fmt.Println("received station measure")
-		// merge data into results
-		for stationName, measure := range stationMeasure {
-			if existingMeasure, ok := result[stationName]; ok {
-				existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
-				existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
-				existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
-				existingMeasure.count += measure.count
-				result[stationName] = existingMeasure
-			} else {
-				result[stationName] = measure
+	var workerPool sync.WaitGroup
+	workerPool.Add(numMergeWorkers)
+	for i := 0; i < numMergeWorkers; i++ {
+		go func() {
+			defer workerPool.Done()
+			for stationMeasure := range measuresChannel {
+				// fmt.Println("received station measure")
+				// merge data into results
+				for stationName, measure := range stationMeasure {
+					resultMutex.Lock()
+					if existingMeasure, ok := result[stationName]; ok {
+						existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
+						existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
+						existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
+						existingMeasure.count += measure.count
+					} else {
+						result[stationName] = measure
+					}
+					resultMutex.Unlock()
+				}
+				// fmt.Println("finished merging chunk")
 			}
-		}
+		}()
 	}
-	close(measuresChannel)
+
+	workerPool.Wait()
+
+	// for stationMeasure := range measuresChannel {
+	// 	// go func(stationMeasure map[string]*StationMeasure) {
+	// 	// 	fmt.Println("received station measure")
+	// 	// 	for stationName, measure := range stationMeasure {
+	// 	// 		resultMutex.Lock()
+	// 	// 		defer resultMutex.Unlock()
+	// 	// 		if existingMeasure, ok := result[stationName]; ok {
+	// 	// 			existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
+	// 	// 			existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
+	// 	// 			existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
+	// 	// 			existingMeasure.count += measure.count
+	// 	// 		} else {
+	// 	// 			result[stationName] = measure
+	// 	// 		}
+	// 	// 	}
+	// 	// }(stationMeasure)
+
+	// 	// fmt.Println("received station measure")
+	// 	// merge data into results
+	// 	for stationName, measure := range stationMeasure {
+	// 		if existingMeasure, ok := result[stationName]; ok {
+	// 			existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
+	// 			existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
+	// 			existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
+	// 			existingMeasure.count += measure.count
+	// 		} else {
+	// 			result[stationName] = measure
+	// 		}
+	// 	}
+	// 	// fmt.Println("finished merging chunk")
+	// }
 
 	// return
 	return result, nil
 }
 
-func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64, outputChannel chan map[string]StationMeasure) error {
+func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64, outputChannel chan map[string]*StationMeasure) error {
 	// read chunk
 	n, err := file.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
 		return fmt.Errorf("error reading chunk: %w", err)
 	}
-	fmt.Println("read n bytes in chunk:", n)
+	// fmt.Println("read n bytes in chunk:", n)
 
-	stationMeasures := make(map[string]StationMeasure)
+	stationMeasures := make(map[string]*StationMeasure)
 	index := 0
 
 	// handle if offset is not 0
@@ -189,23 +233,21 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64, out
 		}
 	}
 
-	fmt.Println("put station measures in channel")
-
 	outputChannel <- stationMeasures
 
 	return nil
 }
 
-func merge(existingMeasures map[string]StationMeasure, newMeasure StationMeasure) map[string]StationMeasure {
+func merge(existingMeasures map[string]*StationMeasure, newMeasure StationMeasure) map[string]*StationMeasure {
 	stationName := newMeasure.StationName
 	if existingMeasure, ok := existingMeasures[stationName]; ok {
 		existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, newMeasure.MinTemp)
 		existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, newMeasure.AvgTemp, existingMeasure.count+newMeasure.count)
 		existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, newMeasure.MaxTemp)
 		existingMeasure.count += newMeasure.count
-		existingMeasures[stationName] = existingMeasure
+		// existingMeasures[stationName] = existingMeasure
 	} else {
-		existingMeasures[stationName] = newMeasure
+		existingMeasures[stationName] = &newMeasure
 	}
 	return existingMeasures
 }
