@@ -10,14 +10,13 @@ import (
 	"time"
 )
 
-// TODO: try moving to SSD
-
 type StationMeasure struct {
-	StationName string
-	MinTemp     float64
 	AvgTemp     float64
+	Count       int
 	MaxTemp     float64
-	count       int
+	MinTemp     float64
+	StationName string
+	Sum         float64
 }
 
 const MB = 1024 * 1024
@@ -33,7 +32,7 @@ func main() {
 	fileName := "measurements.txt" // real file
 
 	// process file, get results
-	results, err := processFileNaive(fileName)
+	results, err := processFile(fileName)
 	if err != nil {
 		panic(fmt.Sprintf("Error running 1brc: %v", err))
 	}
@@ -41,7 +40,7 @@ func main() {
 	// print results
 	fmt.Print("{")
 	for station, results := range results {
-		fmt.Printf("%s=%.1f/%.1f/%.1f, ", station, results.MinTemp, results.AvgTemp, results.MaxTemp) // TODO: round to 1 decimal
+		fmt.Printf("%s=%.1f/%.1f/%.1f, ", station, results.MinTemp, results.Sum/float64(results.Count), results.MaxTemp)
 	}
 	// TODO: remove last ,
 	fmt.Print("}")
@@ -51,7 +50,7 @@ func main() {
 	fmt.Println("1brc took ", elapsed.Seconds(), " seconds")
 }
 
-func processFileNaive(fileName string) (map[string]*StationMeasure, error) {
+func processFile(fileName string) (map[string]*StationMeasure, error) {
 	// open file
 	file, err := os.Open(fileName)
 	if err != nil {
@@ -66,7 +65,7 @@ func processFileNaive(fileName string) (map[string]*StationMeasure, error) {
 	}
 	fileSize := fileInfo.Size()
 	offsets := make([]int64, 0)
-	chunkSize := int64(128 * MB)
+	chunkSize := int64(32 * MB)
 	n := int64(0)
 	for n < fileSize {
 		offsets = append(offsets, int64(n))
@@ -74,7 +73,7 @@ func processFileNaive(fileName string) (map[string]*StationMeasure, error) {
 	}
 	// fmt.Println("offsets", offsets)
 
-	const numMergeWorkers = 15
+	const numMergeWorkers = 1
 
 	measuresChannel := make(chan map[string]*StationMeasure, len(offsets))
 	var wg sync.WaitGroup
@@ -116,9 +115,10 @@ func processFileNaive(fileName string) (map[string]*StationMeasure, error) {
 					resultMutex.Lock()
 					if existingMeasure, ok := result[stationName]; ok {
 						existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
-						existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
+						// existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.Count+measure.Count)
 						existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
-						existingMeasure.count += measure.count
+						existingMeasure.Sum = getNewSum(existingMeasure.Sum, measure.Sum)
+						existingMeasure.Count += measure.Count
 					} else {
 						result[stationName] = measure
 					}
@@ -131,39 +131,6 @@ func processFileNaive(fileName string) (map[string]*StationMeasure, error) {
 
 	workerPool.Wait()
 
-	// for stationMeasure := range measuresChannel {
-	// 	// go func(stationMeasure map[string]*StationMeasure) {
-	// 	// 	fmt.Println("received station measure")
-	// 	// 	for stationName, measure := range stationMeasure {
-	// 	// 		resultMutex.Lock()
-	// 	// 		defer resultMutex.Unlock()
-	// 	// 		if existingMeasure, ok := result[stationName]; ok {
-	// 	// 			existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
-	// 	// 			existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
-	// 	// 			existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
-	// 	// 			existingMeasure.count += measure.count
-	// 	// 		} else {
-	// 	// 			result[stationName] = measure
-	// 	// 		}
-	// 	// 	}
-	// 	// }(stationMeasure)
-
-	// 	// fmt.Println("received station measure")
-	// 	// merge data into results
-	// 	for stationName, measure := range stationMeasure {
-	// 		if existingMeasure, ok := result[stationName]; ok {
-	// 			existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, measure.MinTemp)
-	// 			existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, measure.AvgTemp, existingMeasure.count+measure.count)
-	// 			existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, measure.MaxTemp)
-	// 			existingMeasure.count += measure.count
-	// 		} else {
-	// 			result[stationName] = measure
-	// 		}
-	// 	}
-	// 	// fmt.Println("finished merging chunk")
-	// }
-
-	// return
 	return result, nil
 }
 
@@ -224,7 +191,8 @@ func parseChunk(file *os.File, buffer []byte, offset int64, chunkSize int64, out
 			MinTemp:     value,
 			AvgTemp:     value,
 			MaxTemp:     value,
-			count:       1,
+			Sum:         value,
+			Count:       1,
 		}
 		stationMeasures = merge(stationMeasures, stationMeasure)
 
@@ -242,9 +210,10 @@ func merge(existingMeasures map[string]*StationMeasure, newMeasure StationMeasur
 	stationName := newMeasure.StationName
 	if existingMeasure, ok := existingMeasures[stationName]; ok {
 		existingMeasure.MinTemp = getNewMin(existingMeasure.MinTemp, newMeasure.MinTemp)
-		existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, newMeasure.AvgTemp, existingMeasure.count+newMeasure.count)
+		// existingMeasure.AvgTemp = getNewAverage(existingMeasure.AvgTemp, newMeasure.AvgTemp, existingMeasure.Count+newMeasure.Count)
+		existingMeasure.Sum = getNewSum(existingMeasure.Sum, newMeasure.Sum)
 		existingMeasure.MaxTemp = getNewMax(existingMeasure.MaxTemp, newMeasure.MaxTemp)
-		existingMeasure.count += newMeasure.count
+		existingMeasure.Count += newMeasure.Count
 		// existingMeasures[stationName] = existingMeasure
 	} else {
 		existingMeasures[stationName] = &newMeasure
@@ -262,4 +231,8 @@ func getNewMin(currentMin, newValue float64) float64 {
 
 func getNewMax(currentMax, newValue float64) float64 {
 	return max(currentMax, newValue)
+}
+
+func getNewSum(currentSum, newValue float64) float64 {
+	return currentSum + newValue
 }
