@@ -8,7 +8,13 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"math/rand/v2"
+	_ "net/http/pprof"
 )
+
+// ideas
+// randomize / vary chunk size so merging thread isn't waiting and hit all at once
+// limit processing threads to ~number of cores
 
 type StationMeasure struct {
 	AvgTemp     float64
@@ -17,6 +23,11 @@ type StationMeasure struct {
 	MinTemp     float64
 	StationName string
 	Sum         float64
+}
+
+type Chunk struct {
+	Offset int64
+	ChunkSize int64
 }
 
 const MB = 1024 * 1024
@@ -64,14 +75,19 @@ func processFile(fileName string) (map[string]*StationMeasure, error) {
 		return nil, fmt.Errorf("error getting file info: %w", err)
 	}
 	fileSize := fileInfo.Size()
-	offsets := make([]int64, 0)
-	chunkSize := int64(32 * MB)
+	offsets := make([]Chunk, 0)
+	chunkSizeMin := int64(16 * MB)
+	chunkSizeMax := int64(48 * MB)
 	n := int64(0)
 	for n < fileSize {
-		offsets = append(offsets, int64(n))
+		chunkSize := rand.Int64N(chunkSizeMax-chunkSizeMin) + chunkSizeMin
+		offsets = append(offsets, Chunk{
+			Offset: n,
+			ChunkSize: chunkSize,
+		})
 		n += chunkSize
 	}
-	// fmt.Println("offsets", offsets)
+	fmt.Println("offsets", len(offsets))
 
 	const numMergeWorkers = 1
 
@@ -83,10 +99,10 @@ func processFile(fileName string) (map[string]*StationMeasure, error) {
 	for _, offset := range offsets {
 		// fmt.Println("Processing chunk", i)
 		wg.Add(1)
-		buf := make([]byte, chunkSize+128)
-		go func(offset int64) {
+		buf := make([]byte, offset.ChunkSize+128)
+		go func(offset Chunk) {
 			defer wg.Done()
-			err := parseChunk(file, buf, offset, chunkSize, measuresChannel)
+			err := parseChunk(file, buf, offset.Offset, offset.ChunkSize, measuresChannel)
 			if err != nil {
 				fmt.Println("error parsing chunk: %w", err)
 			}

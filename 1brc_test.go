@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"testing"
 	"os"
+	"testing"
 )
 
 func Test1brc(t *testing.T) {
